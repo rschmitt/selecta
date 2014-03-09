@@ -36,6 +36,7 @@ class Selecta
     # to terminate.
     options = Configuration.parse_options(ARGV)
 
+    buffer_all_input
     search = Screen.with_screen do |screen, tty|
       config = Configuration.from_inputs([], options, screen.height)
       run_in_screen(config, screen, tty)
@@ -85,6 +86,33 @@ class Selecta
     search
   end
 
+  # fork a process that acts as an unlimited buffer for stdin
+  def buffer_all_input
+    read_end, write_end = IO.pipe
+    # after forking, we have to close the reader in the child and the writer in the parent
+    fork do
+      read_end.close
+      buffer = []
+      until $stdin.eof? and buffer.empty?
+        # buffer from stdin
+        while $stdin.ready? and !$stdin.eof?
+          line = $stdin.readline
+          buffer.push(line)
+        end
+
+        # dump to stdout
+        while select([], [write_end], [], 0) != nil and !buffer.empty?
+          line = buffer.shift
+          write_end << line rescue exit # if the parent has exited, we will get a SIGPIPE here
+        end
+      end
+      write_end.close
+      exit
+    end
+    write_end.close
+    $stdin.reopen(read_end)
+  end
+
   # Handle all pending TTY input
   def handle_keys(search, tty)
     while tty.input.ready?
@@ -98,6 +126,9 @@ class Selecta
     new_lines = []
     while $stdin.ready?
       new_lines << $stdin.readline
+      if !$stdin.ready?
+        sleep 0.001 # wait for more input from the buffer process
+      end
     end
     search.append_new_choices(new_lines)
   end
